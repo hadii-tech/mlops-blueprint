@@ -1,0 +1,120 @@
+name: Model Serving CI
+
+on:
+  push:
+    branches: [ "main", "staging" ]
+    paths:
+      - 'model-serving/**'
+      - 'tests/model_serving/**'
+      - 'tests/performance/**'
+      - 'argo-apps/**'
+  pull_request:
+    branches: [ "main", "staging" ]
+    paths:
+      - 'model-serving/**'
+      - 'tests/model_serving/**'
+      - 'tests/performance/**'
+      - 'argo-apps/**'
+
+jobs:
+  model-serving-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Tools
+        run: |
+          pip install --upgrade pip
+          pip install flake8 pytest locust docker requests
+
+      - name: Lint Model Serving
+        run: |
+          flake8 model-serving tests/model_serving
+
+      - name: Run Model Serving Tests
+        run: |
+          pip install -r model-serving/requirements.txt
+          pytest --maxfail=1 --disable-warnings tests/model_serving
+
+      - name: Determine environment
+        id: env_info
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "staging" ]]; then
+            echo "ENVIRONMENT=staging" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "ENVIRONMENT=production" >> $GITHUB_OUTPUT
+          else
+            echo "ENVIRONMENT=staging" >> $GITHUB_OUTPUT
+
+      - name: Log in to DOCR
+        run: |
+          echo "${{ secrets.DOCR_TOKEN }}" | docker login registry.digitalocean.com -u DOCR --password-stdin
+
+      - name: Set Docker Tag
+        id: set_tag
+        run: |
+          COMMIT_SHA="${GITHUB_SHA:0:7}"
+          DATE_TAG=$(date +'%Y%m%d%H%M')
+          VERSION_TAG="${COMMIT_SHA}-${DATE_TAG}"
+          echo "VERSION_TAG=${VERSION_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build model-serving
+        run: |
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          docker build -t local/model-serving model-serving
+          docker tag local/model-serving registry.digitalocean.com/hadii/model-serving:${VERSION}
+
+      - name: Ephemeral Container Integration Test
+        run: |
+          # Run ephemeral container on port 8080
+          container_id=$(docker run -d -p 8080:80 local/model-serving:latest)
+          # Wait a bit
+          sleep 5
+          # Basic integration test
+          curl -X POST http://localhost:8080/predict -H "Content-Type: application/json" -d '{"features":[1,2,3]}'
+          # Wait for container to finish or keep it running for locust
+          # We'll not wait => we keep container up for next step
+
+      - name: Locust Performance Test
+        run: |
+          # Assume container is still running on port 8080
+          locust -f tests/performance/test_model_serving_perf.py --headless -u 10 -r 2 -t 30s --host http://localhost:8080
+
+      - name: Stop Ephemeral Container
+        run: |
+          container_id=$(docker ps -q --filter "ancestor=local/model-serving:latest")
+          if [ -n "$container_id" ]; then
+            docker stop $container_id
+            docker rm $container_id
+          fi
+
+      - name: Push & Update Overlay
+        if: ${{ success() }}
+        run: |
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          docker push registry.digitalocean.com/hadii/model-serving:${VERSION}
+
+          if [[ "${{ steps.env_info.outputs.ENVIRONMENT }}" == "staging" ]]; then
+            sed -i "s|\(image: registry.digitalocean.com/hadii/model-serving:\).*|\1${VERSION}|" argo-apps/overlays/staging/model-serving-deployment.yaml
+          else
+            sed -i "s|\(image: registry.digitalocean.com/hadii/model-serving:\).*|\1${VERSION}|" argo-apps/overlays/production/model-serving-deployment.yaml
+          fi
+
+          git config user.name "CI Bot"
+          git config user.email "ci@hadii.org"
+          git add argo-apps/
+          if git diff --quiet; then
+            echo "No changes."
+          else
+            git commit -m "Update model-serving to ${VERSION}"
+            git push origin ${{ github.ref }}
+
+      - name: Done
+        run: echo "Model-Serving ephemeral test + performance test done."

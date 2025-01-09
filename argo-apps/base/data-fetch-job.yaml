@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-fetch
+  labels:
+    app: data-fetch
+spec:
+  template:
+    spec:
+      serviceAccountName: vault-auth-sa
+      restartPolicy: Never
+      containers:
+        - name: data-fetch-container
+          image: registry.digitalocean.com/hadii/data-fetch:latest
+          env:
+            - name: VAULT_ADDR
+              value: "http://vault.vault.svc.cluster.local:8200"
+            - name: VAULT_PATH_AUTH
+              value: "auth/kubernetes/login"
+            - name: VAULT_ROLE
+              value: "mlops-datafetch"
+            - name: VAULT_SECRET_PATH
+              value: "secret/data/mlops/base/data-fetch"
+          # The code fetches secrets like mongo_uri, github_token from Vault, 
+          # so we only define Vault environment variables here.
+          

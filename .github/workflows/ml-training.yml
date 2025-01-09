@@ -1,0 +1,117 @@
+name: ML Training CI
+
+on:
+  push:
+    branches: [ "main", "staging" ]
+    paths:
+      - 'ml-pipeline/Dockerfile.train'
+      - 'ml-pipeline/train_autoencoder.py'
+      - 'ml-pipeline/requirements.txt'
+      - 'tests/train/**'
+      - 'argo-apps/**'
+  pull_request:
+    branches: [ "main", "staging" ]
+    paths:
+      - 'ml-pipeline/Dockerfile.train'
+      - 'ml-pipeline/train_autoencoder.py'
+      - 'ml-pipeline/requirements.txt'
+      - 'tests/train/**'
+      - 'argo-apps/**'
+
+jobs:
+  ml-training-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Tools
+        run: |
+          pip install --upgrade pip
+          pip install flake8 pytest docker
+
+      - name: Lint ML Training
+        run: |
+          flake8 ml-pipeline/train_autoencoder.py tests/train
+
+      - name: Test ML Training (unit)
+        run: |
+          pip install -r ml-pipeline/requirements.txt
+          pytest --maxfail=1 --disable-warnings tests/train
+
+      - name: Determine environment
+        id: env_info
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "staging" ]]; then
+            echo "ENVIRONMENT=staging" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "ENVIRONMENT=production" >> $GITHUB_OUTPUT
+          else
+            echo "ENVIRONMENT=staging" >> $GITHUB_OUTPUT
+
+      - name: Log in to DOCR
+        run: |
+          echo "${{ secrets.DOCR_TOKEN }}" | docker login registry.digitalocean.com -u DOCR --password-stdin
+
+      - name: Set Docker Tag
+        id: set_tag
+        run: |
+          COMMIT_SHA="${GITHUB_SHA:0:7}"
+          DATE_TAG=$(date +'%Y%m%d%H%M')
+          VERSION_TAG="${COMMIT_SHA}-${DATE_TAG}"
+          echo "VERSION_TAG=${VERSION_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build ml-training
+        run: |
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          docker build -t local/ml-training -f ml-pipeline/Dockerfile.train ml-pipeline
+          docker tag local/ml-training registry.digitalocean.com/hadii/ml-training:${VERSION}
+
+      - name: Ephemeral Container Test
+        run: |
+          container_id=$(docker run -d local/ml-training:latest)
+          exit_code=$(docker wait $container_id)
+          logs=$(docker logs $container_id)
+          docker rm $container_id
+
+          if [ "$exit_code" != "0" ]; then
+            echo "ML Training container failed with code $exit_code"
+            echo "$logs"
+            exit 1
+          fi
+
+          # look for "F1=" or "AUC=" lines in logs
+          if ! echo "$logs" | grep -E "F1=|AUC="; then
+            echo "No training metrics found in logs!"
+            echo "$logs"
+            exit 1
+          fi
+
+      - name: Push & Update Overlay
+        if: ${{ success() }}
+        run: |
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          docker push registry.digitalocean.com/hadii/ml-training:${VERSION}
+
+          if [[ "${{ steps.env_info.outputs.ENVIRONMENT }}" == "staging" ]]; then
+            sed -i "s|\(image: registry.digitalocean.com/hadii/ml-training:\).*|\1${VERSION}|" argo-apps/overlays/staging/ml-training-job.yaml
+          else
+            sed -i "s|\(image: registry.digitalocean.com/hadii/ml-training:\).*|\1${VERSION}|" argo-apps/overlays/production/ml-training-job.yaml
+          fi
+
+          git config user.name "CI Bot"
+          git config user.email "ci@hadii.org"
+          git add argo-apps/
+          if git diff --quiet; then
+            echo "No changes."
+          else
+            git commit -m "Update ml-training image to ${VERSION}"
+            git push origin ${{ github.ref }}
+
+      - name: Done
+        run: echo "ML training pipeline done."

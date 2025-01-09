@@ -1,0 +1,7 @@
+FROM bitnami/spark:3.4.0
+USER root
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY spark_preprocess.py /app/spark_preprocess.py
+CMD ["spark-submit","/app/spark_preprocess.py"]

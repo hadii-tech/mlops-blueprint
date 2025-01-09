@@ -12,10 +12,9 @@ Welcome to our **MLOps** reference repository! This project demonstrates a **mul
 - **MongoDB** and **DigitalOcean Spaces** for data storage.
 
 
-This repository assumes the existence of k8s cluster for each environment (staging and production) to which machine learning artifacts and code are deployed via ArgoCD. Check out our [existing templates](https://github.com/hadii-tech/cloud-infra) to quickly setup and deploy your own production-ready k8s clusters pre-configred with monitoring, logging, and alerting capabilities in Digital Ocean.
+Checkout this [blog post](https://mfadhel.com/mlops-blueprint/) outlining the motivation for this repoisitory. You will need existing k8s clusters to to execute the machine learning pipelines in this repo (preferably one per environment) which are deployed via ArgoCD. If you need help with this requirement, check out our [existing templates](https://github.com/hadii-tech/cloud-infra) to quickly setup and deploy your own production-ready k8s clusters pre-configred with monitoring, logging, and alerting capabilities in Digital Ocean.
 
 ---
-
 
 ### Highlights
 

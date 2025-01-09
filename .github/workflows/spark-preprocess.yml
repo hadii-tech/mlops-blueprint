@@ -1,0 +1,120 @@
+name: Spark Preprocess CI
+
+on:
+  push:
+    branches: [ "main", "staging" ]
+    paths:
+      - 'ml-pipeline/Dockerfile.spark'
+      - 'ml-pipeline/spark_preprocess.py'
+      - 'ml-pipeline/requirements.txt'
+      - 'tests/spark_preprocess/**'
+      - 'argo-apps/**'
+  pull_request:
+    branches: [ "main", "staging" ]
+    paths:
+      - 'ml-pipeline/Dockerfile.spark'
+      - 'ml-pipeline/spark_preprocess.py'
+      - 'ml-pipeline/requirements.txt'
+      - 'tests/spark_preprocess/**'
+      - 'argo-apps/**'
+
+jobs:
+  spark-preprocess-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Tools
+        run: |
+          pip install --upgrade pip
+          pip install flake8 pytest docker
+
+      - name: Lint Code
+        run: |
+          flake8 ml-pipeline/spark_preprocess.py tests/spark_preprocess
+
+      - name: Run Spark Preprocess Tests
+        run: |
+          pip install -r ml-pipeline/requirements.txt
+          pytest --maxfail=1 --disable-warnings tests/spark_preprocess
+
+      - name: Determine environment
+        id: env_info
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "staging" ]]; then
+            echo "ENVIRONMENT=staging" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "ENVIRONMENT=production" >> $GITHUB_OUTPUT
+          else
+            echo "ENVIRONMENT=staging" >> $GITHUB_OUTPUT
+
+      - name: Log in to DOCR
+        run: |
+          echo "${{ secrets.DOCR_TOKEN }}" | docker login registry.digitalocean.com -u DOCR --password-stdin
+
+      - name: Set Docker Tag
+        id: set_tag
+        run: |
+          COMMIT_SHA="${GITHUB_SHA:0:7}"
+          DATE_TAG=$(date +'%Y%m%d%H%M')
+          VERSION_TAG="${COMMIT_SHA}-${DATE_TAG}"
+          echo "VERSION_TAG=${VERSION_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build Spark-Preprocess
+        run: |
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          docker build -t local/spark-preprocess -f ml-pipeline/Dockerfile.spark ml-pipeline
+          docker tag local/spark-preprocess registry.digitalocean.com/hadii/spark-preprocess:${VERSION}
+
+      - name: Ephemeral Integration Test
+        run: |
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          container_id=$(docker run -d local/spark-preprocess:latest)
+          exit_code=$(docker wait $container_id)
+          logs=$(docker logs $container_id)
+          docker rm $container_id
+
+          if [ "$exit_code" != "0" ]; then
+            echo "Spark-Preprocess container failed with code $exit_code"
+            echo "$logs"
+            exit 1
+          fi
+
+          # Check for "Spark Preprocess stage complete." in logs
+          if ! echo "$logs" | grep -q "Spark Preprocess stage complete."; then
+            echo "No success message found in logs!"
+            echo "$logs"
+            exit 1
+          fi
+          echo "Ephemeral test done."
+
+      - name: Push Final & Update Overlay
+        if: ${{ success() }}
+        run: |
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          docker push registry.digitalocean.com/hadii/spark-preprocess:${VERSION}
+
+          if [[ "${{ steps.env_info.outputs.ENVIRONMENT }}" == "staging" ]]; then
+            sed -i "s|\(image: registry.digitalocean.com/hadii/spark-preprocess:\).*|\1${VERSION}|" argo-apps/overlays/staging/spark-preprocess-job.yaml
+          else
+            sed -i "s|\(image: registry.digitalocean.com/hadii/spark-preprocess:\).*|\1${VERSION}|" argo-apps/overlays/production/spark-preprocess-job.yaml
+          fi
+
+          git config user.name "CI Bot"
+          git config user.email "ci@hadii.org"
+          git add argo-apps/
+          if git diff --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update spark-preprocess to ${VERSION}"
+            git push origin ${{ github.ref }}
+
+      - name: Done
+        run: echo "Spark-Preprocess pipeline done."

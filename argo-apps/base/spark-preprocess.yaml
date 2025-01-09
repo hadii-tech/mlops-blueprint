@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spark-preprocess
+  labels:
+    app: spark-preprocess
+spec:
+  template:
+    spec:
+      serviceAccountName: vault-auth-sa
+      restartPolicy: Never
+      containers:
+        - name: spark-preprocess-container
+          image: registry.digitalocean.com/hadii/spark-preprocess:latest
+          env:
+            - name: VAULT_ADDR
+              value: "http://vault.vault.svc.cluster.local:8200"
+            - name: VAULT_PATH_AUTH
+              value: "auth/kubernetes/login"
+            - name: VAULT_ROLE
+              value: "mlops-spark"
+            - name: VAULT_SECRET_PATH
+              value: "secret/data/mlops/base/spark-preprocess"
+            - name: PREPROCESS_RUN_ID
+              value: "manual-run-001"
+              

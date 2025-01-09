@@ -1,0 +1,119 @@
+name: Data-Fetch CI
+
+on:
+  push:
+    branches: [ "main", "staging" ]
+    paths:
+      - 'data-fetch/**'
+      - 'tests/data_fetch/**'
+      - '.github/workflows/**'
+      - 'argo-apps/**'
+  pull_request:
+    branches: [ "main", "staging" ]
+    paths:
+      - 'data-fetch/**'
+      - 'tests/data_fetch/**'
+      - '.github/workflows/**'
+      - 'argo-apps/**'
+
+jobs:
+  data-fetch-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Tools
+        run: |
+          pip install --upgrade pip
+          pip install flake8 pytest docker
+
+      - name: Lint Code
+        run: |
+          flake8 data-fetch tests/data_fetch
+
+      - name: Run Data-Fetch Tests (Unit)
+        run: |
+          pip install -r data-fetch/requirements.txt
+          pytest --maxfail=1 --disable-warnings tests/data_fetch
+
+      - name: Determine environment
+        id: env_info
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "staging" ]]; then
+            echo "ENVIRONMENT=staging" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "ENVIRONMENT=production" >> $GITHUB_OUTPUT
+          else
+            echo "ENVIRONMENT=staging" >> $GITHUB_OUTPUT
+
+      - name: Log in to DOCR
+        run: |
+          echo "${{ secrets.DOCR_TOKEN }}" | docker login registry.digitalocean.com -u DOCR --password-stdin
+
+      - name: Set Docker Tag
+        id: set_tag
+        run: |
+          COMMIT_SHA="${GITHUB_SHA:0:7}"
+          DATE_TAG=$(date +'%Y%m%d%H%M')
+          VERSION_TAG="${COMMIT_SHA}-${DATE_TAG}"
+          echo "VERSION_TAG=${VERSION_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build Data-Fetch
+        run: |
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          docker build -t local/data-fetch data-fetch
+          docker tag local/data-fetch registry.digitalocean.com/hadii/data-fetch:${VERSION}
+
+      - name: Integration Test via Ephemeral Container
+        run: |
+          # Using docker python sdk is possible, but here we do it in shell for brevity
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          echo "Running ephemeral container for data-fetch..."
+          container_id=$(docker run -d local/data-fetch:latest)
+          # wait for container to finish
+          exit_code=$(docker wait $container_id)
+          logs=$(docker logs $container_id)
+          docker rm $container_id
+          if [ "$exit_code" != "0" ]; then
+            echo "Container exited with code $exit_code"
+            echo "$logs"
+            exit 1
+          fi
+          # check logs for "Data fetch complete."
+          if ! echo "$logs" | grep -q "Data fetch complete"; then
+            echo "Did not find completion message in logs!"
+            echo "$logs"
+            exit 1
+          fi
+          echo "Data Fetch ephemeral test passed."
+
+      - name: Push Final Image & Update Overlay
+        if: ${{ success() }}
+        run: |
+          VERSION="${{ steps.set_tag.outputs.VERSION_TAG }}"
+          docker push registry.digitalocean.com/hadii/data-fetch:${VERSION}
+
+          if [[ "${{ steps.env_info.outputs.ENVIRONMENT }}" == "staging" ]]; then
+            sed -i "s|\(image: registry.digitalocean.com/hadii/data-fetch:\).*|\1${VERSION}|" argo-apps/overlays/staging/data-fetch-job.yaml
+          else
+            sed -i "s|\(image: registry.digitalocean.com/hadii/data-fetch:\).*|\1${VERSION}|" argo-apps/overlays/production/data-fetch-job.yaml
+          fi
+
+          git config user.name "CI Bot"
+          git config user.email "ci@hadii.org"
+          git add argo-apps/
+          if git diff --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update data-fetch image to ${VERSION}"
+            git push origin ${{ github.ref }}
+
+      - name: Done
+        run: echo "Data-Fetch pipeline done."

@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ml-training
+  labels:
+    app: ml-training
+spec:
+  template:
+    spec:
+      serviceAccountName: vault-auth-sa
+      restartPolicy: Never
+      containers:
+        - name: ml-training-container
+          image: registry.digitalocean.com/hadii/ml-training:latest
+          env:
+            - name: VAULT_ADDR
+              value: "http://vault.vault.svc.cluster.local:8200"
+            - name: VAULT_PATH_AUTH
+              value: "auth/kubernetes/login"
+            - name: VAULT_ROLE
+              value: "mlops-training"
+            - name: VAULT_SECRET_PATH
+              value: "secret/data/mlops/base/train"
+

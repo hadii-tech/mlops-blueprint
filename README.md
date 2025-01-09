@@ -1,4 +1,4 @@
-# Modern MLOps Template
+# Modern MLOps Blueprint
 
 Welcome to our **MLOps** reference repository! This project demonstrates a **multi-stage** ML pipeline (data-fetch, preprocessing, training, and model-serving) that incorporates **modern cloud-native** technologies tested on Digital Ocean:
 

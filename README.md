@@ -1,6 +1,6 @@
 # Modern MLOps Blueprint
 
-Welcome to our **MLOps** reference repository! This project demonstrates a **multi-stage** ML pipeline (data-fetch, preprocessing, training, and model-serving) that incorporates **modern cloud-native** technologies tested on Digital Ocean:
+This project demonstrates a **multi-stage** ML system designed to detect anamolous GitHub Pull Requests. It incorporates **modern cloud-native** technologies tested on Digital Ocean:
 
 - **Vault** for secure secret management.
 - **GitHub Actions** for CI/CD (building, ephemeral testing).
@@ -18,15 +18,36 @@ You will need existing k8s clusters to to execute the machine learning pipelines
 
 ---
 
-### Highlights
+##  Stages of the Pipeline
 
-- **argo-apps/base**: Single “base” set of manifests for each pipeline stage. Model-serving uses **Argo Rollouts** for a **blue-green** approach.
-- **data-fetch**, **ml-pipeline**, **model-serving**: Dockerfiles and Python code for each stage.
-- **tests**: Unit/integration tests for each stage (plus **Locust** performance tests for model-serving).
+1. **Data-Fetch** (Job)  
+   - Runs `fetch_github_data.py`.  
+   - Pulls secrets from Vault (GitHub token, Mongo URI).  
+   - Upserts PR data into MongoDB.
+
+2. **Spark Preprocess** (Job)  
+   - Runs `spark_preprocess.py`.  
+   - Uses **Spark** to read from Mongo, create features, stores as parquet files in **DigitalOcean Spaces**.  
+   - Secrets for DO Spaces, etc., come from Vault.
+
+3. **ML Training** (Job)  
+   - Runs `train_autoencoder.py`. A simple feedforward autoencoder with:
+      - Encoder: Compresses input data into a lower-dimensional representation.
+      - Decoder: Attempts to reconstruct the input from the compressed representation.
+      - A threshold-based anomaly detection method is used:
+           - Anomalies are detected when reconstruction errors exceed `mean + 2 * std_dev`.
+   - Uses **MLflow** for experiment tracking; references preprocessed data from DO Spaces.  
+   - Also references secrets from Vault (like `mlflow_uri`).
+
+4. **Model-Serving** (**Blue/Green** with Argo Rollouts)  
+   - A Flask-based ML model serving API that is designed to detect anomalies in pull requests, it is a **long-running** service.  
+   - We define a **Rollout** with `blueGreen` strategy in `model-serving-rollout.yaml`.  
+   - We can do a “preview” environment, then “promote” to active service for minimal downtime.  
+   - We run **Locust** performance tests in ephemeral containers to confirm throughput, latency, etc.
 
 ---
 
-## 2. Multi-Branch Approach (Staging & Production)
+## Multi-Branch Approach (Staging & Production)
 
 We use **two** main branches:
 
@@ -45,7 +66,7 @@ No separate “overlays/staging” or “overlays/production” in a single bran
 
 ---
 
-## 3. CI/CD with GitHub Actions
+## CI/CD with GitHub Actions
 
 We define **four** primary workflow files (one per pipeline stage):
 
@@ -80,42 +101,7 @@ Each Python code references environment variables like:
 … then uses **hvac** to authenticate with the **Kubernetes auth** method. Actual secrets (e.g., `mongo_uri`, `github_token`, `mlflow_uri`, etc.) reside in Vault under those paths, ensuring we never store secrets in environment variables or Git.
 
 ---
-
-## 5. Stages of the Pipeline
-
-1. **Data-Fetch** (Job)  
-   - Runs `fetch_github_data.py`.  
-   - Pulls secrets from Vault (GitHub token, Mongo URI).  
-   - Upserts PR data into MongoDB.
-
-2. **Spark Preprocess** (Job)  
-   - Runs `spark_preprocess.py`.  
-   - Uses **Spark** to read from Mongo, create features, store in **DigitalOcean Spaces**.  
-   - Secrets for DO Spaces, etc., come from Vault.
-
-3. **ML Training** (Job)  
-   - Runs `train_autoencoder.py`.  
-   - Uses **MLflow** for experiment tracking; references preprocessed data from DO Spaces.  
-   - Also references secrets from Vault (like `mlflow_uri`).
-
-4. **Model-Serving** (**Blue/Green** with Argo Rollouts)  
-   - A **long-running** service.  
-   - We define a **Rollout** with `blueGreen` strategy in `model-serving-rollout.yaml`.  
-   - We can do a “preview” environment, then “promote” to active service for minimal downtime.  
-   - We run **Locust** performance tests in ephemeral containers to confirm throughput, latency, etc.
-
----
-
-## 6. Spark, MLflow, Locust, and DigitalOcean
-
-- **Spark**: Scalable data processing in the `spark-preprocess.py` stage.  
-- **MLflow**: Tracking training runs (autoencoder metrics like F1, AUC) in the `train_autoencoder.py`.  
-- **Locust**: Performance tests for model-serving (HTTP endpoints). Ensures each new serving image can handle real load.  
-- **DigitalOcean**: We deploy the entire pipeline on **DigitalOcean Kubernetes** clusters for staging/production. Docker images pushed to **DigitalOcean Container Registry**, object storage references in **DigitalOcean Spaces**.
-
----
-
-## 7. Blue-Green for Model-Serving
+## Blue-Green for Model-Serving
 
 Instead of a standard Deployment, we use:
 
